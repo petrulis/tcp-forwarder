@@ -14,20 +14,43 @@ var (
 	ErrServerClosed = errors.New("server closed")
 )
 
+type broadcastMsg struct {
+	data []byte
+	from *conn
+}
+
+// Server is a TCP server that forwards raw TCP data between connected clients.
+// It supports 1 broadcast (buffered) channel, N per-client channels (buffered),
+// drop on backpressure, client specific drop counters, server aborts on slow clients
+// and graceful shutdown.
 type Server struct {
 	addr string
 
 	listener net.Listener
 	conns    map[*conn]struct{}
 
-	mu         sync.Mutex
+	// broadcastCh is the buffered channel for broadcasting messages
+	// to all connected clients. It is buffered to accomodate some
+	// level of burstiness without blocking the sender.
+	broadcastCh chan broadcastMsg
+
+	// mu protects access to conns map during broadcasting
+	// and connection tracking.
+	// It is a RWMutex to allow multiple concurrent readers
+	// to access the conns map. Adding/removing connections
+	// will acquire the lock exclusively.
+	// sync.Map could be used here but it has more overhead
+	// due to maintaining a lock-free map which is
+	// better optimized for Load scenarios, not Range.
+	mu         sync.RWMutex
 	inShutdown atomic.Bool
 }
 
 func NewServer(addr string) *Server {
 	return &Server{
-		addr:  addr,
-		conns: make(map[*conn]struct{}),
+		addr:        addr,
+		conns:       make(map[*conn]struct{}),
+		broadcastCh: make(chan broadcastMsg, 64),
 	}
 }
 
@@ -45,10 +68,37 @@ func (s *Server) ListenAndServe() error {
 	return s.run()
 }
 
+func (s *Server) broadcastLoop() {
+	for msg := range s.broadcastCh {
+		s.mu.RLock()
+		for conn := range s.conns {
+			if conn == msg.from { // skip sender
+				continue
+			}
+			conn.send(msg.data)
+		}
+		s.mu.RUnlock()
+	}
+}
+
+func (s *Server) broadcast(data []byte, from *conn) {
+	select {
+	case s.broadcastCh <- broadcastMsg{data: data, from: from}:
+	default:
+		// The server is overloaded and cannot keep up, probably
+		// due to slow client connections. For simplicity, we just drop
+		// the message here. In a real-world scenario, we might want
+		// to implement more sophisticated backpressure handling.
+		log.Println("broadcast channel full, dropping")
+		return
+	}
+}
+
 // run accepts incoming connections and starts a new goroutine
 // to handle each connection. If a recoverable error occurs during Accept(),
 // it retries with exponential backoff.
 func (s *Server) run() error {
+	go s.broadcastLoop()
 	for {
 		rwc, err := s.listener.Accept()
 		if err != nil {
@@ -58,8 +108,7 @@ func (s *Server) run() error {
 			log.Printf("failed to accept connection: %v", err)
 			continue
 		}
-		c := s.newConn(rwc)
-		go c.serve()
+		go s.newConn(rwc).serve()
 	}
 }
 
@@ -109,8 +158,10 @@ func (s *Server) shuttingDown() bool {
 // newConn creates a new conn instance associated with the server.
 func (s *Server) newConn(rwc net.Conn) *conn {
 	return &conn{
-		server: s,
-		rwc:    rwc,
+		server:     s,
+		rwc:        rwc,
+		remoteAddr: rwc.RemoteAddr().String(),
+		out:        make(chan []byte, 64),
 	}
 }
 

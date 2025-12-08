@@ -6,20 +6,18 @@ import (
 	"log"
 	"net"
 	"runtime/debug"
-	"time"
+	"sync/atomic"
 )
 
 type conn struct {
-	server *Server
-	rwc    net.Conn
-
+	server     *Server
+	rwc        net.Conn
 	remoteAddr string
+	out        chan []byte
+	dropped    uint64
 }
 
 func (c *conn) serve() {
-	if ra := c.rwc.RemoteAddr(); ra != nil {
-		c.remoteAddr = ra.String()
-	}
 	c.server.trackConn(c, true)
 	defer func() {
 		c.rwc.Close()
@@ -35,7 +33,7 @@ func (c *conn) serve() {
 	// Here we can implement a request read loop if we wanted to
 	// implement protocols that require request parsing.
 	// However, the goal is to forward raw TCP data, so we just read and forward bytes.
-
+	go c.writeLoop()
 	// Create a buffered reader for efficiency with small reads and writes from clients.
 	// bufio.Scanner would work here too but it won't be as efficient for raw stream forwarding
 	// due to its tokenization.
@@ -45,31 +43,40 @@ func (c *conn) serve() {
 	buf := make([]byte, 128)
 	for {
 		n, err := reader.Read(buf)
+		if n > 0 {
+			// Broadcast the received data to all other connections.
+			c.server.broadcast(buf[:n], c)
+		}
 		if err != nil {
 			if err != io.EOF {
 				return
 			}
 			break
 		}
+	}
+}
 
-		if n > 0 {
-			data := buf[:n]
-			c.server.mu.Lock()
-			for targetConn := range c.server.conns {
-				if targetConn == c {
-					continue
-				}
-				go func(targetConn *conn, data []byte) {
-					if err := targetConn.rwc.SetWriteDeadline(time.Time{}); err != nil {
-						return
-					}
-					if _, err := targetConn.rwc.Write(data); err != nil {
-						delete(c.server.conns, targetConn)
-						targetConn.rwc.Close()
-					}
-				}(targetConn, append([]byte(nil), data...))
-			}
-			c.server.mu.Unlock()
+func (c *conn) writeLoop() {
+	for data := range c.out {
+		_, err := c.rwc.Write(data)
+		if err != nil {
+			return
 		}
+	}
+}
+
+func (c *conn) send(data []byte) {
+	select {
+	case c.out <- data:
+	default:
+		// The connection is overloaded and cannot keep up, probably
+		// due to slow client connection. Let's introduce a simple
+		// backpressure mechanism by dropping messages
+		// to avoid blocking the server and disconnect the client
+		// after too many of them dropped.
+		if dropped := atomic.AddUint64(&c.dropped, 1); dropped > 10 {
+			c.rwc.Close()
+		}
+		return
 	}
 }
