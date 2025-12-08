@@ -130,8 +130,8 @@ func (c *conn) serve() {
 	for {
 		n, err := reader.Read(buf)
 		if n > 0 {
-			// Broadcast the received data to all other connections.
-			c.server.broadcast(buf[:n], c)
+			// Copy data and broadcast to all other connections.
+			c.server.broadcast(append([]byte(nil), buf[:n]...), c)
 		}
 		if err != nil {
 			if err == errUploadLimitExceeded {
