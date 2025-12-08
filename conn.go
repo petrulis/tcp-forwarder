@@ -3,22 +3,35 @@ package main
 import (
 	"bufio"
 	"io"
+	"log"
 	"net"
+	"runtime/debug"
 	"time"
 )
 
 type conn struct {
 	server *Server
 	rwc    net.Conn
+
+	remoteAddr string
 }
 
 func (c *conn) serve() {
+	if ra := c.rwc.RemoteAddr(); ra != nil {
+		c.remoteAddr = ra.String()
+	}
 	c.server.trackConn(c, true)
 	defer func() {
 		c.rwc.Close()
 		c.server.trackConn(c, false)
 	}()
-
+	// Register recovery callback to avoid crashing the whole
+	// server on panics in connection handling.
+	defer func() {
+		if err := recover(); err != nil {
+			log.Printf("panic serving %v: %v\n%s", c.remoteAddr, err, debug.Stack())
+		}
+	}()
 	// Here we can implement a request read loop if we wanted to
 	// implement protocols that require request parsing.
 	// However, the goal is to forward raw TCP data, so we just read and forward bytes.
