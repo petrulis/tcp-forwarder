@@ -24,7 +24,7 @@ type broadcastMsg struct {
 // drop on backpressure, client specific drop counters, server aborts on slow clients
 // and graceful shutdown.
 type Server struct {
-	addr string
+	Addr string
 
 	listener net.Listener
 	conns    map[*conn]struct{}
@@ -46,26 +46,16 @@ type Server struct {
 	inShutdown atomic.Bool
 }
 
-func NewServer(addr string) *Server {
-	return &Server{
-		addr:        addr,
-		conns:       make(map[*conn]struct{}),
-		broadcastCh: make(chan broadcastMsg, 64),
-	}
-}
-
 func (s *Server) ListenAndServe() error {
 	if s.shuttingDown() {
 		return ErrServerClosed
 	}
-	ln, err := net.Listen("tcp", s.addr)
+	ln, err := net.Listen("tcp", s.Addr)
 	if err != nil {
 		return err
 	}
 
-	s.listener = ln
-
-	return s.run()
+	return s.Serve(ln)
 }
 
 func (s *Server) broadcastLoop() {
@@ -94,10 +84,21 @@ func (s *Server) broadcast(data []byte, from *conn) {
 	}
 }
 
-// run accepts incoming connections and starts a new goroutine
+// Serve accepts incoming connections and starts a new goroutine
 // to handle each connection. If a recoverable error occurs during Accept(),
 // it retries with exponential backoff.
-func (s *Server) run() error {
+func (s *Server) Serve(ln net.Listener) error {
+	s.listener = ln
+
+	s.mu.Lock()
+	if s.conns == nil {
+		s.conns = make(map[*conn]struct{})
+	}
+	if s.broadcastCh == nil {
+		s.broadcastCh = make(chan broadcastMsg, 64)
+	}
+	s.mu.Unlock()
+
 	go s.broadcastLoop()
 	for {
 		rwc, err := s.listener.Accept()
@@ -108,7 +109,13 @@ func (s *Server) run() error {
 			log.Printf("failed to accept connection: %v", err)
 			continue
 		}
-		go s.newConn(rwc).serve()
+		c := s.newConn(rwc)
+		s.trackConn(c, true)
+
+		go func() {
+			c.serve()
+			s.trackConn(c, false)
+		}()
 	}
 }
 
@@ -178,5 +185,6 @@ func (s *Server) trackConn(c *conn, add bool) {
 }
 
 func ListenAndServe(addr string) error {
-	return NewServer(addr).ListenAndServe()
+	srv := Server{Addr: addr}
+	return srv.ListenAndServe()
 }

@@ -14,14 +14,15 @@ const (
 )
 
 func main() {
-	addr := ":9000"
-	srv := NewServer(addr)
+	srv := Server{
+		Addr: ":9000",
+	}
 	// Channel for OS signals
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
 
 	go func() {
-		log.Printf("TCP Forwarder starting on %s\n", addr)
+		log.Printf("TCP Forwarder starting on %s\n", srv.Addr)
 		if err := srv.ListenAndServe(); err != nil && err != ErrServerClosed {
 			log.Fatalf("Failed to start: %v\n", err)
 		}

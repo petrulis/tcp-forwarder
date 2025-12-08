@@ -39,18 +39,20 @@ func TestTCPForwarding(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			serverAddr := ":9001"
+			ln, err := net.Listen("tcp", ":0")
+			if err != nil {
+				t.Fatalf("Failed to start listener: %v", err)
+			}
+			var srv Server
 			go func() {
-				if err := ListenAndServe(serverAddr); err != nil {
+				if err := srv.Serve(ln); err != nil {
 					t.Errorf("Server failed: %v", err)
 				}
 			}()
-			// Wait for server to start
-			time.Sleep(100 * time.Millisecond)
 
 			var clients []net.Conn
 			for range tt.input.messages {
-				conn, err := net.Dial("tcp", serverAddr)
+				conn, err := net.Dial("tcp", ln.Addr().String())
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -103,22 +105,21 @@ func TestTCPForwarding(t *testing.T) {
 }
 
 func TestServer_Shutdown(t *testing.T) {
-	srv := NewServer(":0")
+	var srv Server
 
-	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != ErrServerClosed {
-			t.Errorf("Server failed: %v", err)
-		}
-	}()
-	// Wait for server to start
-	time.Sleep(100 * time.Millisecond)
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("Failed to start listener: %v", err)
+	}
+	defer ln.Close()
 
-	conn, err := net.Dial("tcp", srv.listener.Addr().String())
+	go srv.Serve(ln)
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-
 	// Shutdown the server
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -127,7 +128,7 @@ func TestServer_Shutdown(t *testing.T) {
 	}
 
 	// Attempt to connect after shutdown
-	_, err = net.Dial("tcp", srv.listener.Addr().String())
+	_, err = net.Dial("tcp", ln.Addr().String())
 	if err == nil {
 		t.Fatal("Expected connection failure after shutdown, but succeeded")
 	}

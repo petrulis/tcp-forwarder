@@ -104,11 +104,7 @@ type conn struct {
 }
 
 func (c *conn) serve() {
-	c.server.trackConn(c, true)
-	defer func() {
-		c.rwc.Close()
-		c.server.trackConn(c, false)
-	}()
+	defer c.rwc.Close()
 	// Register recovery callback to avoid crashing the whole
 	// server on panics in connection handling.
 	defer func() {
