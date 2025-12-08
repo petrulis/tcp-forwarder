@@ -12,14 +12,10 @@ type conn struct {
 	rwc    net.Conn
 }
 
-func (c *conn) Close() error {
-	return c.rwc.Close()
-}
-
 func (c *conn) serve() {
 	c.server.trackConn(c, true)
 	defer func() {
-		c.Close()
+		c.rwc.Close()
 		c.server.trackConn(c, false)
 	}()
 
@@ -46,7 +42,7 @@ func (c *conn) serve() {
 		if n > 0 {
 			data := buf[:n]
 			c.server.mu.Lock()
-			for targetConn := range c.server.activeConn {
+			for targetConn := range c.server.conns {
 				if targetConn == c {
 					continue
 				}
@@ -55,7 +51,7 @@ func (c *conn) serve() {
 						return
 					}
 					if _, err := targetConn.rwc.Write(data); err != nil {
-						delete(c.server.activeConn, targetConn)
+						delete(c.server.conns, targetConn)
 						targetConn.rwc.Close()
 					}
 				}(targetConn, append([]byte(nil), data...))

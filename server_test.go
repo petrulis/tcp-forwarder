@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net"
 	"testing"
 	"time"
@@ -98,5 +99,36 @@ func TestTCPForwarding(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestServer_Shutdown(t *testing.T) {
+	srv := NewServer(":0")
+
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && err != ErrServerClosed {
+			t.Errorf("Server failed: %v", err)
+		}
+	}()
+	// Wait for server to start
+	time.Sleep(100 * time.Millisecond)
+
+	conn, err := net.Dial("tcp", srv.listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	// Shutdown the server
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown failed: %v", err)
+	}
+
+	// Attempt to connect after shutdown
+	_, err = net.Dial("tcp", srv.listener.Addr().String())
+	if err == nil {
+		t.Fatal("Expected connection failure after shutdown, but succeeded")
 	}
 }
