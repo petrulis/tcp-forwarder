@@ -160,6 +160,7 @@ func (s *Server) newConn(rwc net.Conn) *conn {
 	return &conn{
 		server:     s,
 		rwc:        rwc,
+		lc:         newLimitedConn(rwc),
 		remoteAddr: rwc.RemoteAddr().String(),
 		out:        make(chan []byte, 64),
 	}
