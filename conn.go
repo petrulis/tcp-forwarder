@@ -53,7 +53,6 @@ func (lc *limitedConn) Read(b []byte) (int, error) {
 	defer lc.uploadMu.Unlock()
 
 	if lc.uploaded >= lc.maxBytes {
-		log.Printf("Upload limit reached: %d bytes, maxBytes: %d", lc.uploaded, lc.maxBytes)
 		return 0, errUploadLimitExceeded
 	}
 
@@ -66,7 +65,6 @@ func (lc *limitedConn) Read(b []byte) (int, error) {
 	if n > 0 {
 		lc.uploaded += uint64(n)
 		if lc.uploaded >= lc.maxBytes {
-			log.Printf("Upload limit reached: %d bytes, maxBytes: %d", lc.uploaded, lc.maxBytes)
 			return n, errUploadLimitExceeded
 		}
 	}
@@ -122,9 +120,8 @@ func (c *conn) serve() {
 			log.Printf("panic serving %v: %v\n%s", c.remoteAddr, err, debug.Stack())
 		}
 	}()
-	// Here we can implement a request read loop if we wanted to
-	// implement protocols that require request parsing.
-	// However, the goal is to forward raw TCP data, so we just read and forward bytes.
+	// This is where we can implement request parsing if needed,
+	// however, the goal is to forward raw TCP data, so we just read and forward bytes.
 	go c.writeLoop()
 	// Create a buffered reader for efficiency with small reads and writes from clients.
 	// bufio.Scanner would work here too but it won't be as efficient for raw stream forwarding

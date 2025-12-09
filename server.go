@@ -99,8 +99,7 @@ func (s *Server) broadcast(data []byte, from *conn) {
 }
 
 // Serve accepts incoming connections and starts a new goroutine
-// to handle each connection. If a recoverable error occurs during Accept(),
-// it retries with exponential backoff.
+// to handle each connection.
 func (s *Server) Serve(ln net.Listener) error {
 	s.listener = ln
 
@@ -141,7 +140,7 @@ func (s *Server) closeConns() bool {
 	// Here we can check if in-flight operations are done before closing
 	// however, for simplicity, we just close all connections.
 	for c := range s.conns {
-		// This may block until TCP buffers are flushed.
+		// In very rare cases this may block until TCP buffers are flushed.
 		// Can be slow for slow connections.
 		c.rwc.Close()
 		delete(s.conns, c)
