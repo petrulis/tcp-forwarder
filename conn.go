@@ -3,17 +3,18 @@ package main
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const (
-	maxBytes = 100
-	limitMsg = "\nYou've reached the 100-byte limit. Goodbye!\n"
+	writeDeadline = 1 * time.Second
 )
 
 var (
@@ -25,6 +26,8 @@ var (
 // upload and download byte limits.
 type limitedConn struct {
 	rwc io.ReadWriteCloser
+
+	maxBytes uint64
 
 	// mutexes protects access to uploaded and downloaded counters.
 	// It should be more efficient to use atomics for
@@ -38,9 +41,10 @@ type limitedConn struct {
 	downloaded uint64
 }
 
-func newLimitedConn(rwc io.ReadWriteCloser) *limitedConn {
+func newLimitedConn(rwc io.ReadWriteCloser, maxBytes uint64) *limitedConn {
 	return &limitedConn{
-		rwc: rwc,
+		rwc:      rwc,
+		maxBytes: maxBytes,
 	}
 }
 
@@ -48,11 +52,12 @@ func (lc *limitedConn) Read(b []byte) (int, error) {
 	lc.uploadMu.Lock()
 	defer lc.uploadMu.Unlock()
 
-	if lc.uploaded >= maxBytes {
+	if lc.uploaded >= lc.maxBytes {
+		log.Printf("Upload limit reached: %d bytes, maxBytes: %d", lc.uploaded, lc.maxBytes)
 		return 0, errUploadLimitExceeded
 	}
 
-	remaining := maxBytes - lc.uploaded
+	remaining := lc.maxBytes - lc.uploaded
 	if uint64(len(b)) > remaining {
 		b = b[:remaining]
 	}
@@ -60,7 +65,8 @@ func (lc *limitedConn) Read(b []byte) (int, error) {
 	n, err := lc.rwc.Read(b)
 	if n > 0 {
 		lc.uploaded += uint64(n)
-		if lc.uploaded >= maxBytes {
+		if lc.uploaded >= lc.maxBytes {
+			log.Printf("Upload limit reached: %d bytes, maxBytes: %d", lc.uploaded, lc.maxBytes)
 			return n, errUploadLimitExceeded
 		}
 	}
@@ -71,11 +77,11 @@ func (lc *limitedConn) Write(b []byte) (int, error) {
 	lc.downloadMu.Lock()
 	defer lc.downloadMu.Unlock()
 
-	if lc.downloaded >= maxBytes {
+	if lc.downloaded >= lc.maxBytes {
 		return 0, errDownloadLimitExceeded
 	}
 
-	remaining := maxBytes - lc.downloaded
+	remaining := lc.maxBytes - lc.downloaded
 	if uint64(len(b)) > remaining {
 		b = b[:remaining]
 	}
@@ -83,7 +89,7 @@ func (lc *limitedConn) Write(b []byte) (int, error) {
 	n, err := lc.rwc.Write(b)
 	if n > 0 {
 		lc.downloaded += uint64(n)
-		if lc.downloaded >= maxBytes {
+		if lc.downloaded >= lc.maxBytes {
 			return n, errDownloadLimitExceeded
 		}
 	}
@@ -104,6 +110,10 @@ type conn struct {
 }
 
 func (c *conn) serve() {
+	log.Printf("New connection from %s\n", c.remoteAddr)
+	defer func() {
+		log.Printf("Connection from %s closed\n", c.remoteAddr)
+	}()
 	defer c.rwc.Close()
 	// Register recovery callback to avoid crashing the whole
 	// server on panics in connection handling.
@@ -124,6 +134,10 @@ func (c *conn) serve() {
 	// to allow decent throughput by minimizing number of syscalls.
 	buf := make([]byte, 128)
 	for {
+		// Let the connection to listen for messages
+		// indefinitely.
+		c.rwc.SetReadDeadline(time.Time{})
+
 		n, err := reader.Read(buf)
 		if n > 0 {
 			// Copy data and broadcast to all other connections.
@@ -131,7 +145,6 @@ func (c *conn) serve() {
 		}
 		if err != nil {
 			if err == errUploadLimitExceeded {
-				log.Printf("Upload limit reached for %s", c.remoteAddr)
 				c.sendLimitNoticeAndClose()
 				return
 			}
@@ -145,9 +158,10 @@ func (c *conn) serve() {
 
 func (c *conn) writeLoop() {
 	for data := range c.out {
+		c.rwc.SetWriteDeadline(time.Now().Add(writeDeadline))
+
 		_, err := c.lc.Write(data)
 		if err == errDownloadLimitExceeded {
-			log.Printf("Download limit reached for %s", c.remoteAddr)
 			c.sendLimitNoticeAndClose()
 			return
 		}
@@ -167,6 +181,7 @@ func (c *conn) send(data []byte) {
 		// to avoid blocking the server and disconnect the client
 		// after too many of them dropped.
 		if dropped := atomic.AddUint64(&c.dropped, 1); dropped > 10 {
+			log.Printf("Connection to %s dropped %d messages, closing\n", c.remoteAddr, dropped)
 			c.rwc.Close()
 		}
 		return
@@ -174,7 +189,8 @@ func (c *conn) send(data []byte) {
 }
 
 func (c *conn) sendLimitNoticeAndClose() {
-	if _, err := c.rwc.Write([]byte(limitMsg)); err != nil {
+	msg := fmt.Sprintf("\nYou've reached the %d-byte limit. Goodbye!\n", c.lc.maxBytes)
+	if _, err := c.rwc.Write([]byte(msg)); err != nil {
 		log.Printf("Failed to send limit notice to %s: %v", c.remoteAddr, err)
 	}
 	c.rwc.Close()

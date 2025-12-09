@@ -2,117 +2,121 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 )
 
-func TestTCPForwarding(t *testing.T) {
-	type input struct {
-		// A slice of clients with their messages.
-		messages [][]byte
+func TestServer(t *testing.T) {
+	const (
+		numClients   = 100
+		numMessages  = 5
+		idleDeadline = 2 * time.Second
+	)
+	// Generate input dynamically
+	input := make([][]string, numClients)
+	for i := 0; i < numClients; i++ {
+		msgs := make([]string, numMessages)
+		for j := 0; j < numMessages; j++ {
+			msgs[j] = fmt.Sprintf("c%dm%d", i, j)
+		}
+		input[i] = msgs
 	}
-	type expected struct {
-		// Expected messages received by each client.
-		messages [][]byte
-	}
-	tests := []struct {
-		name     string
-		input    input
-		expected expected
-	}{
-		{
-			name: "should forward data between two clients",
-			input: input{
-				messages: [][]byte{
-					[]byte("Hello from client 1"),
-					[]byte("Hello from client 2"),
-				},
-			},
-			expected: expected{
-				messages: [][]byte{
-					[]byte("Hello from client 2"),
-					[]byte("Hello from client 1"),
-				},
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ln, err := net.Listen("tcp", ":0")
-			if err != nil {
-				t.Fatalf("Failed to start listener: %v", err)
-			}
-			var srv Server
-			go func() {
-				if err := srv.Serve(ln); err != nil {
-					t.Errorf("Server failed: %v", err)
-				}
-			}()
-
-			var clients []net.Conn
-			for range tt.input.messages {
-				conn, err := net.Dial("tcp", ln.Addr().String())
-				if err != nil {
-					t.Fatal(err)
-				}
-				clients = append(clients, conn)
-				defer conn.Close()
-			}
-
-			// Channel to collect messages
-			type result struct {
-				idx int
-				msg []byte
-				err error
-			}
-			results := make(chan result, len(clients))
-
-			// Start reading from clients
-			for i, client := range clients {
-				go func(i int, c net.Conn) {
-					buffer := make([]byte, 1024)
-					c.SetReadDeadline(time.Now().Add(2 * time.Second))
-					n, err := c.Read(buffer)
-					results <- result{i, buffer[:n], err}
-				}(i, client)
-			}
-
-			// Send messages
-			for i, msg := range tt.input.messages {
-				if _, err := clients[i].Write(msg); err != nil {
-					t.Fatal(err)
-				}
-			}
-
-			// Check received messages
-			received := make([][]byte, len(clients))
-			for range clients {
-				r := <-results
-				if r.err != nil {
-					t.Fatalf("Client %d read failed: %v", r.idx, r.err)
-				}
-				received[r.idx] = r.msg
-			}
-
-			for i := range tt.expected.messages {
-				if string(received[i]) != string(tt.expected.messages[i]) {
-					t.Errorf("Client %d expected '%s', got '%s'", i, tt.expected.messages[i], received[i])
-				}
-			}
-		})
-	}
-}
-
-func TestServer_Shutdown(t *testing.T) {
-	var srv Server
 
 	ln, err := net.Listen("tcp", ":0")
 	if err != nil {
 		t.Fatalf("Failed to start listener: %v", err)
 	}
 	defer ln.Close()
+	srv := Server{
+		BufferSize:     512,
+		ConnMaxBytes:   numClients * numMessages * 32,
+		ConnBufferSize: 512,
+	}
 
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("Server failed: %v", err)
+		}
+	}()
+
+	clients := make([]net.Conn, numClients)
+	for i := 0; i < numClients; i++ {
+		c, err := net.Dial("tcp", ln.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		clients[i] = c
+		defer c.Close()
+	}
+
+	type result struct {
+		idx  int
+		data string
+		err  error
+	}
+	results := make(chan result, numClients)
+	for i, c := range clients {
+		go func(i int, conn net.Conn) {
+			conn.SetReadDeadline(time.Now().Add(idleDeadline))
+			buf, err := io.ReadAll(conn)
+			if err != nil {
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					results <- result{i, string(buf), nil}
+					return
+				}
+				if err != io.EOF {
+					results <- result{i, "", err}
+					return
+				}
+			}
+			results <- result{i, string(buf), nil}
+		}(i, c)
+	}
+
+	for i, msgs := range input {
+		clients[i].SetWriteDeadline(time.Now().Add(idleDeadline))
+		for _, msg := range msgs {
+			// Just spawn in a goroutine
+			go func(i int, msg string) {
+				if _, err := clients[i].Write([]byte(msg)); err != nil {
+					panic(err) // keep it simple
+				}
+			}(i, msg)
+		}
+	}
+
+	for i := 0; i < numClients; i++ {
+		r := <-results
+		if r.err != nil {
+			t.Fatalf("Client %d read failed: %v", r.idx, r.err)
+		}
+		// Check that all messages from other clients exist somewhere in the received string
+		for j := 0; j < numClients; j++ {
+			if j == r.idx {
+				continue
+			}
+			for _, msg := range input[j] {
+				if !strings.Contains(r.data, msg) {
+					t.Errorf("Client %d missing message: %s", r.idx, msg)
+				}
+			}
+		}
+	}
+}
+
+func TestServer_Shutdown(t *testing.T) {
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("Failed to start listener: %v", err)
+	}
+	defer ln.Close()
+
+	var srv Server
 	go srv.Serve(ln)
 
 	conn, err := net.Dial("tcp", ln.Addr().String())

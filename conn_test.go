@@ -119,7 +119,7 @@ func TestLimitedConn_Read(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			conn := newLimitedConn(&testConn{
 				r: strings.NewReader(tt.input.data),
-			})
+			}, 100)
 			conn.uploaded = tt.input.uploaded
 			buf := make([]byte, tt.input.bufSize)
 			n, err := conn.Read(buf)
@@ -207,7 +207,7 @@ func TestLimitedConn_Write(t *testing.T) {
 			var buf bytes.Buffer
 			lc := newLimitedConn(&testConn{
 				w: &buf,
-			})
+			}, 100)
 			lc.downloaded = tt.input.initialDownloaded
 
 			n, err := lc.Write([]byte(tt.input.data))
@@ -269,7 +269,7 @@ func TestLimitedConn_ConcurrentWrites(t *testing.T) {
 			var buf bytes.Buffer
 			conn := newLimitedConn(&testConn{
 				w: &buf,
-			})
+			}, 100)
 
 			var wg sync.WaitGroup
 			for i := 0; i < tt.input.numWriters; i++ {

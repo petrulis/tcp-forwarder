@@ -15,7 +15,10 @@ const (
 
 func main() {
 	srv := Server{
-		Addr: ":9000",
+		Addr:           ":9000",
+		ConnMaxBytes:   100,
+		BufferSize:     64,
+		ConnBufferSize: 64,
 	}
 	// Channel for OS signals
 	stop := make(chan os.Signal, 1)

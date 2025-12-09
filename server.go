@@ -10,6 +10,10 @@ import (
 	"time"
 )
 
+const (
+	defaultMaxBytes = 100
+)
+
 var (
 	ErrServerClosed = errors.New("server closed")
 )
@@ -25,6 +29,16 @@ type broadcastMsg struct {
 // and graceful shutdown.
 type Server struct {
 	Addr string
+
+	ConnMaxBytes uint64
+
+	// Buffer size for the broadcast channel size
+	// for absorbing bursts of messages.
+	BufferSize int
+
+	// ConnBufferSeize is the per-connection outgoing
+	// message buffer size.
+	ConnBufferSize int
 
 	listener net.Listener
 	conns    map[*conn]struct{}
@@ -79,7 +93,7 @@ func (s *Server) broadcast(data []byte, from *conn) {
 		// due to slow client connections. For simplicity, we just drop
 		// the message here. In a real-world scenario, we might want
 		// to implement more sophisticated backpressure handling.
-		log.Println("broadcast channel full, dropping")
+		log.Printf("Server buffer is full, dropping")
 		return
 	}
 }
@@ -95,7 +109,7 @@ func (s *Server) Serve(ln net.Listener) error {
 		s.conns = make(map[*conn]struct{})
 	}
 	if s.broadcastCh == nil {
-		s.broadcastCh = make(chan broadcastMsg, 64)
+		s.broadcastCh = make(chan broadcastMsg, s.BufferSize)
 	}
 	s.mu.Unlock()
 
@@ -106,8 +120,10 @@ func (s *Server) Serve(ln net.Listener) error {
 			if s.shuttingDown() {
 				return ErrServerClosed
 			}
-			log.Printf("failed to accept connection: %v", err)
-			continue
+			if errors.Is(err, net.ErrClosed) {
+				return nil // listener closed, exit gracefully
+			}
+			return err
 		}
 		c := s.newConn(rwc)
 		s.trackConn(c, true)
@@ -164,12 +180,15 @@ func (s *Server) shuttingDown() bool {
 
 // newConn creates a new conn instance associated with the server.
 func (s *Server) newConn(rwc net.Conn) *conn {
+	if s.ConnMaxBytes == 0 {
+		s.ConnMaxBytes = defaultMaxBytes
+	}
 	return &conn{
 		server:     s,
 		rwc:        rwc,
-		lc:         newLimitedConn(rwc),
+		lc:         newLimitedConn(rwc, s.ConnMaxBytes),
 		remoteAddr: rwc.RemoteAddr().String(),
-		out:        make(chan []byte, 64),
+		out:        make(chan []byte, s.ConnBufferSize),
 	}
 }
 
