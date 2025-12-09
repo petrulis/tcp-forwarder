@@ -64,17 +64,14 @@ func TestServer(t *testing.T) {
 		go func(i int, conn net.Conn) {
 			conn.SetReadDeadline(time.Now().Add(idleDeadline))
 			buf, err := io.ReadAll(conn)
-			if err != nil {
-				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-					results <- result{i, string(buf), nil}
-					return
-				}
-				if err != io.EOF {
-					results <- result{i, "", err}
-					return
-				}
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				results <- result{i, string(buf), nil}
+				return
 			}
-			results <- result{i, string(buf), nil}
+			if err == io.EOF {
+				err = nil
+			}
+			results <- result{i, string(buf), err}
 		}(i, c)
 	}
 
@@ -106,6 +103,61 @@ func TestServer(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestServer_ByteLimit(t *testing.T) {
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("Failed to start listener: %v", err)
+	}
+	defer ln.Close()
+
+	srv := Server{
+		ConnMaxBytes:   100,
+		BufferSize:     64,
+		ConnBufferSize: 64,
+	}
+
+	go func() {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, net.ErrClosed) {
+			t.Errorf("Server failed: %v", err)
+		}
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	// Start reading to capture the server's goodbye message.
+	done := make(chan string, 1)
+	go func() {
+		buf, err := io.ReadAll(conn)
+		if err != nil && err != io.EOF {
+			t.Errorf("Failed to read response: %v", err)
+		}
+		done <- string(buf)
+	}()
+
+	data := make([]byte, 100)
+	for i := range data {
+		data[i] = 'b'
+	}
+
+	if _, err := conn.Write(data); err != nil {
+		t.Fatalf("Failed to write data: %v", err)
+	}
+
+	select {
+	case response := <-done:
+		expectedMsg := "You've reached the 100-byte limit. Goodbye!"
+		if !strings.Contains(response, expectedMsg) {
+			t.Errorf("Expected goodbye message containing %q, got %q", expectedMsg, response)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout waiting for goodbye message")
 	}
 }
 
