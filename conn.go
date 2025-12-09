@@ -186,6 +186,8 @@ func (c *conn) send(data []byte) {
 }
 
 func (c *conn) sendLimitNoticeAndClose() {
+	c.rwc.SetWriteDeadline(time.Now().Add(writeDeadline))
+
 	msg := fmt.Sprintf("\nYou've reached the %d-byte limit. Goodbye!\n", c.lc.maxBytes)
 	if _, err := c.rwc.Write([]byte(msg)); err != nil {
 		log.Printf("Failed to send limit notice to %s: %v", c.remoteAddr, err)
